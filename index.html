@@ -97,7 +97,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-const MAX = 50 * 1024 * 1024; // лимит Contents API ~100 МБ, берём с запасом
+const MAX = 95 * 1024 * 1024; // GitHub не принимает файлы больше 100 МБ
 let files = []; // {file, li, status}
 
 // --- настройки ---
@@ -162,13 +162,18 @@ function render() {
 }
 
 // --- GitHub ---
-function toBase64(file) {
-  return new Promise((res, rej) => {
-    const r = new FileReader();
-    r.onload = () => res(r.result.split(',')[1]);
-    r.onerror = () => rej(new Error('не удалось прочитать файл'));
-    r.readAsDataURL(file);
-  });
+// base64 по кусочкам (кратно 3 байтам), чтобы не держать в памяти огромную строку
+async function toBase64Chunks(file) {
+  const STEP = 3 * 1024 * 1024, out = [];
+  for (let i = 0; i < file.size; i += STEP) {
+    out.push(await new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(r.result.split(',')[1]);
+      r.onerror = () => rej(new Error('не удалось прочитать файл'));
+      r.readAsDataURL(file.slice(i, i + STEP));
+    }));
+  }
+  return out;
 }
 function apiUrl(repo, path, branch) {
   const p = path.split('/').map(encodeURIComponent).join('/');
@@ -201,11 +206,13 @@ async function upload(it, cfg) {
     // 404 здесь = файла ещё нет (или нет доступа к репозиторию — это выяснится при записи)
   }
 
-  const body = { message: `Добавлен файл ${name}`, content: await toBase64(it.file) };
-  if (cfg.branch) body.branch = cfg.branch;
-  if (sha) { body.sha = sha; body.message = `Обновлён файл ${name}`; }
+  const meta = { message: (sha ? 'Обновлён файл ' : 'Добавлен файл ') + name };
+  if (cfg.branch) meta.branch = cfg.branch;
+  if (sha) meta.sha = sha;
+  const chunks = await toBase64Chunks(it.file);
+  const payload = new Blob([JSON.stringify(meta).slice(0, -1) + ',"content":"', ...chunks, '"}'], { type: 'application/json' });
 
-  const put = await gh(apiUrl(cfg.repo, path), { method: 'PUT', body: JSON.stringify(body) }, cfg.token);
+  const put = await gh(apiUrl(cfg.repo, path), { method: 'PUT', body: payload }, cfg.token);
   if (!put.ok) {
     const m = put.data.message || ('ошибка ' + put.status);
     if (put.status === 404) throw new Error('репозиторий или ветка не найдены, либо у токена нет доступа');
