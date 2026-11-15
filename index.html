@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Загрузка файлов в GitHub</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1c1e21; --mute:#6b7280; --line:#e3e6ea; --acc:#2563eb; --ok:#15803d; --err:#b91c1c; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#15171a; --card:#1f2226; --ink:#e8eaed; --mute:#9aa1ab; --line:#32363c; --acc:#5b8def; --ok:#4ade80; --err:#f87171; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  main { max-width:640px; margin:0 auto; padding:20px 16px 60px; }
+  h1 { font-size:22px; margin:8px 0 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin-bottom:14px; }
+  label { display:block; font-size:13px; color:var(--mute); margin:10px 0 4px; }
+  label:first-child { margin-top:0; }
+  input[type=text], input[type=password] { width:100%; padding:11px 12px; border:1px solid var(--line); border-radius:10px; background:transparent; color:inherit; font-size:16px; }
+  .row { display:flex; gap:10px; } .row > div { flex:1; min-width:0; }
+  .check { display:flex; gap:8px; align-items:center; font-size:14px; color:var(--mute); margin-top:10px; }
+  .check input { width:18px; height:18px; }
+  .drop { border:2px dashed var(--line); border-radius:14px; padding:28px 12px; text-align:center; color:var(--mute); cursor:pointer; }
+  .drop.over { border-color:var(--acc); color:var(--acc); }
+  .drop b { color:var(--ink); }
+  button { width:100%; padding:14px; border:0; border-radius:12px; background:var(--acc); color:#fff; font-size:17px; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  button.link { background:none; color:var(--acc); width:auto; padding:0; font-size:14px; font-weight:400; }
+  ul { list-style:none; padding:0; margin:0; }
+  li { display:flex; justify-content:space-between; gap:10px; padding:9px 0; border-bottom:1px solid var(--line); font-size:14px; }
+  li:last-child { border-bottom:0; }
+  li .n { word-break:break-all; } li .s { white-space:nowrap; color:var(--mute); }
+  .ok .s { color:var(--ok); } .err .s { color:var(--err); }
+  .hint { font-size:13px; color:var(--mute); margin-top:8px; }
+  #msg { margin-top:12px; font-size:14px; }
+  a { color:var(--acc); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Загрузка файлов в GitHub</h1>
+
+  <div class="card">
+    <label>Токен GitHub (с правом записи в репозиторий)</label>
+    <input type="password" id="token" placeholder="github_pat_…" autocomplete="off">
+    <div class="row">
+      <div><label>Репозиторий (владелец/имя)</label><input type="text" id="repo" placeholder="olga/my-repo" autocapitalize="off" autocorrect="off"></div>
+      <div><label>Ветка</label><input type="text" id="branch" placeholder="main" autocapitalize="off"></div>
+    </div>
+    <label>Папка в репозитории (необязательно)</label>
+    <input type="text" id="dir" placeholder="docs/uploads" autocapitalize="off">
+    <div class="check"><input type="checkbox" id="remember"><span>Запомнить настройки и токен в этом браузере</span></div>
+    <div class="hint">Токен: GitHub → Settings → Developer settings → Fine-grained tokens → доступ к нужному репозиторию, Contents: Read and write.</div>
+  </div>
+
+  <div class="card">
+    <div class="drop" id="drop"><b>Нажмите, чтобы выбрать файлы</b><br>или перетащите их сюда</div>
+    <input type="file" id="file" multiple hidden>
+    <div class="check"><input type="checkbox" id="overwrite" checked><span>Заменять файлы с тем же именем</span></div>
+  </div>
+
+  <div class="card" id="listCard" hidden>
+    <ul id="list"></ul>
+    <div style="margin-top:12px"><button class="link" id="clear">Очистить список</button></div>
+  </div>
+
+  <button id="go" disabled>Загрузить в репозиторий</button>
+  <div id="msg"></div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const MAX = 50 * 1024 * 1024; // лимит Contents API ~100 МБ, берём с запасом
+let files = []; // {file, li, status}
+
+// --- настройки ---
+const KEYS = ['token','repo','branch','dir'];
+try {
+  if (localStorage.getItem('ghu_remember') === '1') {
+    $('remember').checked = true;
+    KEYS.forEach(k => { const v = localStorage.getItem('ghu_' + k); if (v) $(k).value = v; });
+  }
+} catch (e) {}
+function saveSettings() {
+  try {
+    if ($('remember').checked) {
+      localStorage.setItem('ghu_remember', '1');
+      KEYS.forEach(k => localStorage.setItem('ghu_' + k, $(k).value));
+    } else {
+      localStorage.removeItem('ghu_remember');
+      KEYS.forEach(k => localStorage.removeItem('ghu_' + k));
+    }
+  } catch (e) {}
+}
+
+// --- выбор файлов ---
+$('drop').onclick = () => $('file').click();
+$('file').onchange = e => { add(e.target.files); e.target.value = ''; };
+['dragenter','dragover'].forEach(t => $('drop').addEventListener(t, e => { e.preventDefault(); $('drop').classList.add('over'); }));
+['dragleave','drop'].forEach(t => $('drop').addEventListener(t, e => { e.preventDefault(); $('drop').classList.remove('over'); }));
+$('drop').addEventListener('drop', e => add(e.dataTransfer.files));
+$('clear').onclick = () => { files = []; render(); };
+
+function fmt(n) { return n > 1048576 ? (n/1048576).toFixed(1) + ' МБ' : Math.max(1, Math.round(n/1024)) + ' КБ'; }
+
+function add(list) {
+  for (const f of list) {
+    if (files.some(x => x.file.name === f.name && x.file.size === f.size)) continue;
+    const item = { file: f, status: f.size > MAX ? 'err' : 'wait', text: f.size > MAX ? 'слишком большой' : fmt(f.size) };
+    files.push(item);
+  }
+  render();
+}
+function render() {
+  $('listCard').hidden = files.length === 0;
+  $('list').innerHTML = '';
+  files.forEach(it => {
+    const li = document.createElement('li');
+    li.className = it.status === 'ok' ? 'ok' : it.status === 'err' ? 'err' : '';
+    li.innerHTML = '<span class="n"></span><span class="s"></span>';
+    li.children[0].textContent = it.file.name;
+    li.children[1].textContent = it.text;
+    $('list').appendChild(li);
+  });
+  $('go').disabled = !files.some(f => f.status === 'wait');
+}
+
+// --- GitHub ---
+function toBase64(file) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result.split(',')[1]);
+    r.onerror = () => rej(new Error('не удалось прочитать файл'));
+    r.readAsDataURL(file);
+  });
+}
+function apiUrl(repo, path, branch) {
+  const p = path.split('/').map(encodeURIComponent).join('/');
+  return `https://api.github.com/repos/${repo}/contents/${p}` + (branch ? `?ref=${encodeURIComponent(branch)}` : '');
+}
+async function gh(url, opts, token) {
+  const r = await fetch(url, { ...opts, headers: {
+    'Authorization': 'Bearer ' + token,
+    'Accept': 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+    'Content-Type': 'application/json'
+  }});
+  const data = await r.json().catch(() => ({}));
+  return { ok: r.ok, status: r.status, data };
+}
+
+async function upload(it, cfg) {
+  const name = it.file.name;
+  const dir = cfg.dir.replace(/^\/+|\/+$/g, '');
+  const path = dir ? dir + '/' + name : name;
+  const url = apiUrl(cfg.repo, path, cfg.branch);
+
+  let sha;
+  const ex = await gh(url, { method: 'GET' }, cfg.token);
+  if (ex.ok && ex.data && ex.data.sha) {
+    if (!cfg.overwrite) throw new Error('уже существует');
+    sha = ex.data.sha;
+  } else if (ex.status === 401) throw new Error('неверный токен');
+  else if (ex.status === 404 && /Not Found/i.test(ex.data.message || '') && !ex.data.documentation_url?.includes('contents')) {
+    // 404 здесь = файла ещё нет (или нет доступа к репозиторию — это выяснится при записи)
+  }
+
+  const body = { message: `Добавлен файл ${name}`, content: await toBase64(it.file) };
+  if (cfg.branch) body.branch = cfg.branch;
+  if (sha) { body.sha = sha; body.message = `Обновлён файл ${name}`; }
+
+  const put = await gh(apiUrl(cfg.repo, path), { method: 'PUT', body: JSON.stringify(body) }, cfg.token);
+  if (!put.ok) {
+    const m = put.data.message || ('ошибка ' + put.status);
+    if (put.status === 404) throw new Error('репозиторий или ветка не найдены, либо у токена нет доступа');
+    if (put.status === 403) throw new Error('нет прав на запись (' + m + ')');
+    if (put.status === 409) throw new Error('конфликт, повторите');
+    throw new Error(m);
+  }
+}
+
+$('go').onclick = async () => {
+  const cfg = {
+    token: $('token').value.trim(),
+    repo: $('repo').value.trim().replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '').replace(/\/+$/, ''),
+    branch: $('branch').value.trim(),
+    dir: $('dir').value.trim(),
+    overwrite: $('overwrite').checked
+  };
+  if (!cfg.token || !/^[^\/\s]+\/[^\/\s]+$/.test(cfg.repo)) {
+    $('msg').textContent = 'Укажите токен и репозиторий в виде «владелец/имя».';
+    return;
+  }
+  saveSettings();
+  $('go').disabled = true; $('msg').textContent = '';
+  let okCount = 0, errCount = 0;
+  for (const it of files) {
+    if (it.status !== 'wait') continue;
+    it.text = 'загружается…'; render();
+    try {
+      await upload(it, cfg);
+      it.status = 'ok'; it.text = 'готово ✓'; okCount++;
+    } catch (e) {
+      it.status = 'err'; it.text = e.message || 'ошибка'; errCount++;
+    }
+    render();
+  }
+  $('go').disabled = !files.some(f => f.status === 'wait');
+  const link = `https://github.com/${cfg.repo}/tree/${cfg.branch || 'HEAD'}/${cfg.dir.replace(/^\/+|\/+$/g,'')}`;
+  $('msg').innerHTML = `Загружено: ${okCount}` + (errCount ? `, с ошибкой: ${errCount}` : '') +
+    ` · <a href="${link}" target="_blank" rel="noopener">открыть в GitHub</a>`;
+};
+render();
+</script>
+</body>
+</html>
