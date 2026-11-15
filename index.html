@@ -280,8 +280,17 @@ $('go').onclick = async () => {
     if (it.status !== 'wait') continue;
     it.text = 'загружается…'; render();
     try {
-      if (mode === 'release') await uploadAsset(it, cfg, rel); else await upload(it, cfg);
-      it.status = 'ok'; it.text = 'готово ✓'; okCount++;
+      let note = 'готово ✓';
+      if (mode === 'release') {
+        try { await uploadAsset(it, cfg, rel); }
+        catch (e) {
+          // браузер не смог напрямую отправить файл на сервер релизов — кладём файл в папку с именем тега
+          if (!(e instanceof TypeError)) throw e;
+          await upload(it, { ...cfg, dir: cfg.tag, branch: '' });
+          note = 'готово ✓ (в папке ' + cfg.tag + ')';
+        }
+      } else await upload(it, cfg);
+      it.status = 'ok'; it.text = note; okCount++;
     } catch (e) {
       it.status = 'err'; it.text = e.message || 'ошибка'; errCount++;
     }
