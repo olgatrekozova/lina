@@ -16,6 +16,8 @@
   .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin-bottom:14px; }
   label { display:block; font-size:13px; color:var(--mute); margin:10px 0 4px; }
   label:first-child { margin-top:0; }
+  select { width:100%; padding:11px 12px; border:1px solid var(--line); border-radius:10px; background:transparent; color:inherit; font-size:16px; }
+  [hidden] { display:none !important; }
   input[type=text], input[type=password] { width:100%; padding:11px 12px; border:1px solid var(--line); border-radius:10px; background:transparent; color:inherit; font-size:16px; }
   .row { display:flex; gap:10px; } .row > div { flex:1; min-width:0; }
   .check { display:flex; gap:8px; align-items:center; font-size:14px; color:var(--mute); margin-top:10px; }
@@ -43,12 +45,37 @@
   <div class="card">
     <label>Токен GitHub (с правом записи в репозиторий)</label>
     <input type="password" id="token" placeholder="github_pat_…" autocomplete="off">
-    <div class="row">
-      <div><label>Репозиторий (владелец/имя)</label><input type="text" id="repo" placeholder="olga/my-repo" autocapitalize="off" autocorrect="off"></div>
-      <div><label>Ветка</label><input type="text" id="branch" placeholder="main" autocapitalize="off"></div>
+    <label>Репозиторий</label>
+    <select id="repoSel">
+      <option value="olgatrekozova/angelina">angelina</option>
+      <option value="olgatrekozova/sergey">sergey</option>
+      <option value="olgatrekozova/test">test</option>
+      <option value="">другой…</option>
+    </select>
+    <input type="text" id="repo" placeholder="владелец/имя" autocapitalize="off" autocorrect="off" hidden style="margin-top:8px">
+
+    <label>Куда класть файлы</label>
+    <select id="mode">
+      <option value="release">В Release (файлы прикрепляются к релизу)</option>
+      <option value="repo">Прямо в репозиторий</option>
+    </select>
+
+    <div id="relBox">
+      <label>Тег релиза</label>
+      <input type="text" id="tag" placeholder="v1.0" autocapitalize="off" autocorrect="off">
+      <label>Название релиза</label>
+      <input type="text" id="title" placeholder="Например: Выпуск 15 ноября">
+      <label>Описание (необязательно)</label>
+      <input type="text" id="notes" placeholder="Что внутри">
+      <div class="hint">Если релиз с таким тегом уже есть, файлы добавятся к нему. В репозитории должен быть хотя бы один коммит.</div>
     </div>
-    <label>Папка в репозитории (необязательно)</label>
-    <input type="text" id="dir" placeholder="docs/uploads" autocapitalize="off">
+
+    <div id="repoBox" hidden>
+      <div class="row">
+        <div><label>Ветка</label><input type="text" id="branch" placeholder="main" autocapitalize="off"></div>
+        <div><label>Папка (необязательно)</label><input type="text" id="dir" placeholder="docs/uploads" autocapitalize="off"></div>
+      </div>
+    </div>
     <div class="check"><input type="checkbox" id="remember"><span>Запомнить настройки и токен в этом браузере</span></div>
     <div class="hint">Токен: GitHub → Settings → Developer settings → Fine-grained tokens → доступ к нужному репозиторию, Contents: Read and write.</div>
   </div>
@@ -74,7 +101,7 @@ const MAX = 50 * 1024 * 1024; // лимит Contents API ~100 МБ, берём �
 let files = []; // {file, li, status}
 
 // --- настройки ---
-const KEYS = ['token','repo','branch','dir'];
+const KEYS = ['token','repoSel','repo','mode','branch','dir'];
 try {
   if (localStorage.getItem('ghu_remember') === '1') {
     $('remember').checked = true;
@@ -92,6 +119,15 @@ function saveSettings() {
     }
   } catch (e) {}
 }
+
+function syncUI() {
+  $('repo').hidden = $('repoSel').value !== '';
+  const rel = $('mode').value === 'release';
+  $('relBox').hidden = !rel;
+  $('repoBox').hidden = rel;
+}
+$('repoSel').onchange = $('mode').onchange = syncUI;
+syncUI();
 
 // --- выбор файлов ---
 $('drop').onclick = () => $('file').click();
@@ -179,26 +215,72 @@ async function upload(it, cfg) {
   }
 }
 
+// --- Release ---
+async function getOrCreateRelease(cfg) {
+  const base = `https://api.github.com/repos/${cfg.repo}/releases`;
+  const ex = await gh(`${base}/tags/${encodeURIComponent(cfg.tag)}`, { method: 'GET' }, cfg.token);
+  if (ex.ok) return ex.data;
+  if (ex.status === 401) throw new Error('неверный токен');
+  const body = { tag_name: cfg.tag, name: cfg.title || cfg.tag, body: cfg.notes || '' };
+  const cr = await gh(base, { method: 'POST', body: JSON.stringify(body) }, cfg.token);
+  if (!cr.ok) {
+    if (cr.status === 404) throw new Error('репозиторий не найден или у токена нет доступа');
+    if (cr.status === 403) throw new Error('нет прав на запись (нужен Contents: Read and write)');
+    if (cr.status === 422) throw new Error('не удалось создать релиз: ' + (cr.data.message || '') + ' (пустой репозиторий?)');
+    throw new Error(cr.data.message || ('ошибка ' + cr.status));
+  }
+  return cr.data;
+}
+async function uploadAsset(it, cfg, rel) {
+  const url = `https://uploads.github.com/repos/${cfg.repo}/releases/${rel.id}/assets?name=${encodeURIComponent(it.file.name)}`;
+  const existing = (rel.assets || []).find(a => a.name === it.file.name);
+  if (existing) {
+    if (!cfg.overwrite) throw new Error('уже есть в релизе');
+    await gh(`https://api.github.com/repos/${cfg.repo}/releases/assets/${existing.id}`, { method: 'DELETE' }, cfg.token);
+  }
+  const r = await fetch(url, { method: 'POST', body: it.file, headers: {
+    'Authorization': 'Bearer ' + cfg.token,
+    'Accept': 'application/vnd.github+json',
+    'Content-Type': it.file.type || 'application/octet-stream'
+  }});
+  if (!r.ok) {
+    const d = await r.json().catch(() => ({}));
+    throw new Error(d.message || ('ошибка ' + r.status));
+  }
+}
+
 $('go').onclick = async () => {
+  const mode = $('mode').value;
   const cfg = {
     token: $('token').value.trim(),
-    repo: $('repo').value.trim().replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '').replace(/\/+$/, ''),
+    repo: ($('repoSel').value || $('repo').value).trim().replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '').replace(/\/+$/, ''),
     branch: $('branch').value.trim(),
     dir: $('dir').value.trim(),
+    tag: $('tag').value.trim(),
+    title: $('title').value.trim(),
+    notes: $('notes').value.trim(),
     overwrite: $('overwrite').checked
   };
   if (!cfg.token || !/^[^\/\s]+\/[^\/\s]+$/.test(cfg.repo)) {
     $('msg').textContent = 'Укажите токен и репозиторий в виде «владелец/имя».';
     return;
   }
+  if (mode === 'release' && !cfg.tag) {
+    $('msg').textContent = 'Укажите тег релиза, например v1.0.';
+    return;
+  }
   saveSettings();
   $('go').disabled = true; $('msg').textContent = '';
-  let okCount = 0, errCount = 0;
+  let okCount = 0, errCount = 0, rel = null;
+  if (mode === 'release') {
+    try { $('msg').textContent = 'Создаю релиз…'; rel = await getOrCreateRelease(cfg); $('msg').textContent = ''; }
+    catch (e) { $('msg').textContent = e.message; $('go').disabled = false; return; }
+  }
   for (const it of files) {
     if (it.status !== 'wait') continue;
     it.text = 'загружается…'; render();
     try {
-      await upload(it, cfg);
+      if (mode === 'release') await uploadAsset(it, cfg, rel); else await upload(it, cfg);
       it.status = 'ok'; it.text = 'готово ✓'; okCount++;
     } catch (e) {
       it.status = 'err'; it.text = e.message || 'ошибка'; errCount++;
@@ -206,7 +288,8 @@ $('go').onclick = async () => {
     render();
   }
   $('go').disabled = !files.some(f => f.status === 'wait');
-  const link = `https://github.com/${cfg.repo}/tree/${cfg.branch || 'HEAD'}/${cfg.dir.replace(/^\/+|\/+$/g,'')}`;
+  const link = mode === 'release' ? (rel.html_url || `https://github.com/${cfg.repo}/releases`)
+    : `https://github.com/${cfg.repo}/tree/${cfg.branch || 'HEAD'}/${cfg.dir.replace(/^\/+|\/+$/g,'')}`;
   $('msg').innerHTML = `Загружено: ${okCount}` + (errCount ? `, с ошибкой: ${errCount}` : '') +
     ` · <a href="${link}" target="_blank" rel="noopener">открыть в GitHub</a>`;
 };
