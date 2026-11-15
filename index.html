@@ -93,6 +93,7 @@
 
   <button id="go" disabled>Загрузить в репозиторий</button>
   <div id="msg"></div>
+  <div class="hint">Версия 4 · лимит файла 95 МБ</div>
 </main>
 
 <script>
@@ -142,7 +143,7 @@ function fmt(n) { return n > 1048576 ? (n/1048576).toFixed(1) + ' МБ' : Math.m
 function add(list) {
   for (const f of list) {
     if (files.some(x => x.file.name === f.name && x.file.size === f.size)) continue;
-    const item = { file: f, status: f.size > MAX ? 'err' : 'wait', text: f.size > MAX ? 'слишком большой' : fmt(f.size) };
+    const item = { file: f, status: f.size > MAX ? 'err' : 'wait', text: f.size > MAX ? 'больше 95 МБ (' + fmt(f.size) + ')' : fmt(f.size) };
     files.push(item);
   }
   render();
